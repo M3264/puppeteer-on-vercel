@@ -37,13 +37,13 @@ app.get('/ss', async (req, res) => {
     await page.goto(url, {
       waitUntil: 'networkidle2'
     });
-    await wait(3500);
+    await wait(500);
     const img = await page.screenshot({
       fullPage: true
     });
 
     res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Disposition', 'inline; filename="ironman.png"');
+    res.setHeader('Content-Disposition', 'inline; filename="kordd.png"');
     res.end(img);
   } catch (error) {
     console.error(error);
