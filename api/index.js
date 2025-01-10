@@ -112,7 +112,7 @@ app.get('/ss', async (req, res) => {
     }
 
     // Wait for content to stabilize
-    await wait(1000);
+    await wait(10);
 
     // Take screenshot
     const screenshotOptions = {
