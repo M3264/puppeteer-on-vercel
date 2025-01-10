@@ -6,146 +6,161 @@ const { Mutex } = require('async-mutex');
 const app = express();
 const port = 3000;
 const lock = new Mutex();
-const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Predefined device configurations
+// Browser pool configuration
+let browserPool = null;
+const MAX_POOL_SIZE = 3; // Adjust based on your server's capacity
+
+// Initialize browser pool
+async function initBrowserPool() {
+  if (!browserPool) {
+    browserPool = [];
+    for (let i = 0; i < MAX_POOL_SIZE; i++) {
+      const browser = await puppeteerExtra.launch({
+        args: [
+          ...chromium.args,
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--hide-scrollbars',
+          '--disable-notifications',
+          '--disable-extensions',
+          '--disable-logging',
+          '--no-default-browser-check',
+          '--disable-background-networking',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-breakpad',
+          '--disable-component-extensions-with-background-pages',
+          '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+          '--disable-ipc-flooding-protection',
+          '--disable-renderer-backgrounding',
+          '--enable-low-end-device-mode',
+        ],
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true,
+    });
+      browserPool.push(browser);
+    }
+  }
+}
+
+// Get available browser from pool
+async function getBrowser() {
+  if (!browserPool) await initBrowserPool();
+  return browserPool[Math.floor(Math.random() * MAX_POOL_SIZE)];
+}
+
+// Device configurations optimized for speed
 const devicePresets = {
   mobile: {
     width: 375,
     height: 667,
-    deviceScaleFactor: 2,
+    deviceScaleFactor: 1, // Reduced for speed
     isMobile: true,
-    hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'
   },
   tablet: {
     width: 768,
     height: 1024,
-    deviceScaleFactor: 2,
+    deviceScaleFactor: 1,
     isMobile: true,
-    hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPad; CPU OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'
   },
   desktop: {
     width: 1920,
     height: 1080,
     deviceScaleFactor: 1,
     isMobile: false,
-    hasTouch: false,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
   }
 };
 
 app.get('/ss', async (req, res) => {
   const { url, device = 'desktop', width, height, fullPage = 'true' } = req.query;
-
+  
   if (!url) {
-    return res.status(400).send('URL is required');
+    return res.status(400).send('URL required');
   }
 
-  let browser;
+  let page;
   const release = await lock.acquire();
 
   try {
-    browser = await puppeteerExtra.launch({
-      args: [
-        ...chromium.args,
-        '--no-zygote',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+    const browser = await getBrowser();
+    page = await browser.newPage();
+
+    // Aggressive performance optimizations
+    await page.setCacheEnabled(true);
+    await page.setRequestInterception(true);
+    
+    // Block unnecessary resources
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'websocket'].includes(resourceType)) {
+        req.abort();
+      } else if (resourceType === 'script') {
+        // Only allow essential scripts
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
 
-    const page = await browser.newPage();
-
-    // Set viewport and device parameters
-    let deviceSettings = devicePresets[device.toLowerCase()] || devicePresets.desktop;
-    
-    // Override width and height if provided in query params
-    if (width && height) {
-      deviceSettings = {
-        ...deviceSettings,
-        width: parseInt(width),
-        height: parseInt(height)
-      };
-    }
+    // Disable JavaScript for faster loading
+    await page.setJavaScriptEnabled(false);
 
     // Apply device settings
-    await page.setUserAgent(deviceSettings.userAgent);
-    await page.setViewport({
-      width: deviceSettings.width,
-      height: deviceSettings.height,
-      deviceScaleFactor: deviceSettings.deviceScaleFactor,
-      isMobile: deviceSettings.isMobile,
-      hasTouch: deviceSettings.hasTouch,
-    });
-
-    // Add request interception to optimize loading
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      // Skip unnecessary resources
-      const resourceType = request.resourceType();
-      if (['font', 'media'].includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
-
-    // Navigate to URL with improved error handling
-    try {
-      await page.goto(url, {
-        waitUntil: 'networkidle2',
-        timeout: 30000 // 30 second timeout
-      });
-    } catch (error) {
-      if (error.name === 'TimeoutError') {
-        console.warn(`Navigation timeout for ${url}, attempting screenshot anyway`);
-      } else {
-        throw error;
-      }
+    let deviceSettings = devicePresets[device.toLowerCase()] || devicePresets.desktop;
+    if (width && height) {
+      deviceSettings.width = parseInt(width);
+      deviceSettings.height = parseInt(height);
     }
 
-    // Wait for content to stabilize
-    await wait(10);
+    await page.setViewport(deviceSettings);
 
-    // Take screenshot
-    const screenshotOptions = {
+    // Optimized page load
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded', // Faster than networkidle2
+      timeout: 10000 // 10 second timeout
+    });
+
+    // Take screenshot immediately
+    const img = await page.screenshot({
       fullPage: fullPage === 'true',
-      type: 'png',
+      type: 'jpeg', // JPEG is faster than PNG
+      quality: 80, // Reduced quality for speed
       encoding: 'binary',
-      captureBeyondViewport: true,
-    };
+    });
 
-    const img = await page.screenshot(screenshotOptions);
-
-    // Set response headers
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Content-Disposition', 'inline; filename="screenshot.png"');
-    res.setHeader('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Disposition', 'inline; filename="screenshot.jpg"');
     res.end(img);
 
   } catch (error) {
     console.error('Screenshot error:', error);
-    res.status(500).send(`Screenshot failed: ${error.message}`);
+    res.status(500).send('Screenshot failed');
   } finally {
-    if (browser) {
-      await browser.close();
+    if (page) {
+      await page.close(); // Close page but keep browser
     }
     release();
   }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+// Initialize browser pool on startup
+app.listen(port, async () => {
+  await initBrowserPool();
+  console.log(`Fast screenshot service running on port ${port}`);
 });
 
-app.listen(port, () => {
-  console.log(`Screenshot service running on port ${port}`);
+// Cleanup on exit
+process.on('SIGINT', async () => {
+  if (browserPool) {
+    for (const browser of browserPool) {
+      await browser.close();
+    }
+  }
+  process.exit();
 });
