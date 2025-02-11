@@ -1,13 +1,18 @@
 const express = require('express');
 const puppeteerExtra = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const chromium = require('@sparticuz/chromium');
 const { Mutex } = require('async-mutex');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth').default;
 
 const app = express();
 const port = 3000;
 const lock = new Mutex();
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Apply Puppeteer Stealth Plugin
+const stealth = StealthPlugin();
+stealth.enabledEvasions.delete('chrome.app'); // Remove broken evasion
+puppeteerExtra.use(stealth);
 
 // Predefined device configurations
 const devicePresets = {
@@ -37,11 +42,13 @@ const devicePresets = {
   }
 };
 
-// Screenshot endpoint
+// 📸 Screenshot endpoint
 app.get('/ss', async (req, res) => {
   const { url, device = 'desktop', width, height, fullPage = 'true' } = req.query;
 
-  if (!url) return res.status(400).send('URL is required');
+  if (!url) {
+    return res.status(400).send('URL is required');
+  }
 
   let browser;
   const release = await lock.acquire();
@@ -62,8 +69,9 @@ app.get('/ss', async (req, res) => {
     });
 
     const page = await browser.newPage();
-
     let deviceSettings = devicePresets[device.toLowerCase()] || devicePresets.desktop;
+
+    // Override width & height if provided
     if (width && height) {
       deviceSettings = { ...deviceSettings, width: parseInt(width), height: parseInt(height) };
     }
@@ -77,16 +85,17 @@ app.get('/ss', async (req, res) => {
       hasTouch: deviceSettings.hasTouch,
     });
 
+    // Block unnecessary resources
     await page.setRequestInterception(true);
     page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      if (['font', 'media'].includes(resourceType)) {
+      if (['font', 'media'].includes(request.resourceType())) {
         request.abort();
       } else {
         request.continue();
       }
     });
 
+    // Navigate & take a screenshot
     try {
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
     } catch (error) {
@@ -94,7 +103,13 @@ app.get('/ss', async (req, res) => {
     }
 
     await wait(500);
-    const img = await page.screenshot({ fullPage: fullPage === 'true', type: 'png', encoding: 'binary', captureBeyondViewport: true });
+
+    const img = await page.screenshot({
+      fullPage: fullPage === 'true',
+      type: 'png',
+      encoding: 'binary',
+      captureBeyondViewport: true,
+    });
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'inline; filename="screenshot.png"');
@@ -110,60 +125,53 @@ app.get('/ss', async (req, res) => {
   }
 });
 
-puppeteerExtra.use(StealthPlugin());
-
+// 🔍 Google Search Scraper Endpoint
 app.get('/google', async (req, res) => {
-  const { q } = req.query;
-  if (!q) return res.status(400).send('Query parameter "q" is required');
+  const { query } = req.query;
+  if (!query) return res.status(400).send({ error: 'Query parameter is required' });
 
   let browser;
   const release = await lock.acquire();
 
   try {
     browser = await puppeteerExtra.launch({
-      args: [
-        ...chromium.args,
-        '--no-zygote',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
+      args: [...chromium.args, '--no-sandbox', '--disable-gpu'],
+      defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
     });
 
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    await page.setUserAgent(devicePresets.desktop.userAgent);
 
-    await page.waitForSelector('.tF2Cxc', { timeout: 5000 });
+    // Navigate to Google Search
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
 
+    // Extract search results
     const results = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('.tF2Cxc')).map(result => ({
-        title: result.querySelector('h3')?.innerText || 'No title',
-        link: result.querySelector('a')?.href || 'No link',
-        snippet: result.querySelector('.VwiC3b')?.innerText || 'No snippet'
+      return Array.from(document.querySelectorAll('div.tF2Cxc')).map(el => ({
+        title: el.querySelector('h3')?.innerText || '',
+        link: el.querySelector('a')?.href || '',
+        snippet: el.querySelector('.VwiC3b')?.innerText || '',
       }));
     });
 
-    res.json({ query: q, results });
+    res.json({ query, results });
 
   } catch (error) {
-    console.error('Google search error:', error);
-    res.status(500).send(`Google search failed: ${error.message}`);
+    console.error('Google search failed:', error);
+    res.status(500).json({ error: `Google search failed: ${error.message}` });
   } finally {
     if (browser) await browser.close();
     release();
   }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
+// ✅ Health Check
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
+// 🚀 Start the Server
 app.listen(port, () => {
   console.log(`Service running on port ${port}`);
 });
