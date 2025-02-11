@@ -5,16 +5,14 @@ const chromium = require('@sparticuz/chromium');
 const { Mutex } = require('async-mutex');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 const lock = new Mutex();
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Apply Puppeteer Stealth Plugin
-const stealth = StealthPlugin();
-stealth.enabledEvasions.delete('chrome.app'); // Remove broken evasion
-puppeteerExtra.use(stealth);
+// Apply stealth plugin
+puppeteerExtra.use(StealthPlugin());
 
-// Predefined device configurations
+// Device configurations
 const devicePresets = {
   mobile: {
     width: 375,
@@ -38,140 +36,191 @@ const devicePresets = {
     deviceScaleFactor: 1,
     isMobile: false,
     hasTouch: false,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
   }
 };
 
-// 📸 Screenshot endpoint
-app.get('/ss', async (req, res) => {
-  const { url, device = 'desktop', width, height, fullPage = 'true' } = req.query;
+// Browser launch configuration
+const getBrowserConfig = () => ({
+  args: [
+    ...chromium.args,
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process',
+    '--disable-extensions'
+  ],
+  defaultViewport: null,
+  executablePath: process.env.CHROME_PATH || chromium.executablePath,
+  headless: "new",
+  ignoreHTTPSErrors: true
+});
 
-  if (!url) {
-    return res.status(400).send('URL is required');
+// Page setup helper
+async function setupPage(browser, deviceConfig) {
+  const page = await browser.newPage();
+  await page.setUserAgent(deviceConfig.userAgent);
+  await page.setViewport({
+    width: deviceConfig.width,
+    height: deviceConfig.height,
+    deviceScaleFactor: deviceConfig.deviceScaleFactor,
+    isMobile: deviceConfig.isMobile,
+    hasTouch: deviceConfig.hasTouch
+  });
+  
+  // Block unnecessary resources
+  await page.setRequestInterception(true);
+  page.on('request', (request) => {
+    const resourceType = request.resourceType();
+    if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+      request.abort();
+    } else {
+      request.continue();
+    }
+  });
+
+  return page;
+}
+
+// Google search helper
+async function extractGoogleResults(page) {
+  await page.waitForSelector('div.g', { timeout: 5000 }).catch(() => null);
+  
+  return page.evaluate(() => {
+    const results = [];
+    const elements = document.querySelectorAll('div.g');
+    
+    elements.forEach(element => {
+      const titleEl = element.querySelector('h3');
+      const linkEl = element.querySelector('a');
+      const snippetEl = element.querySelector('div.VwiC3b');
+      
+      if (titleEl && linkEl) {
+        results.push({
+          title: titleEl.innerText.trim(),
+          link: linkEl.href,
+          snippet: snippetEl ? snippetEl.innerText.trim() : ''
+        });
+      }
+    });
+    
+    return results;
+  });
+}
+
+// Google Search endpoint
+app.get('/google', async (req, res) => {
+  const { query, numResults = 10 } = req.query;
+  
+  if (!query) {
+    return res.status(400).json({ error: 'Query parameter is required' });
   }
 
   let browser;
   const release = await lock.acquire();
 
   try {
-    browser = await puppeteerExtra.launch({
-      args: [
-        ...chromium.args,
-        '--no-zygote',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+    browser = await puppeteerExtra.launch(getBrowserConfig());
+    const page = await setupPage(browser, devicePresets.desktop);
+
+    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`, {
+      waitUntil: 'networkidle0',
+      timeout: 15000
     });
 
-    const page = await browser.newPage();
-    let deviceSettings = devicePresets[device.toLowerCase()] || devicePresets.desktop;
+    await wait(1000); // Small delay to ensure content loads
+    
+    const results = await extractGoogleResults(page);
+    
+    res.json({
+      query,
+      results: results.slice(0, parseInt(numResults))
+    });
 
-    // Override width & height if provided
+  } catch (error) {
+    console.error('Google search error:', error);
+    res.status(500).json({ 
+      error: 'Search failed',
+      message: error.message
+    });
+  } finally {
+    if (browser) {
+      await browser.close().catch(console.error);
+    }
+    release();
+  }
+});
+
+// Screenshot endpoint
+app.get('/screenshot', async (req, res) => {
+  const { url, device = 'desktop', width, height, fullPage = 'true' } = req.query;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL parameter is required' });
+  }
+
+  let browser;
+  const release = await lock.acquire();
+
+  try {
+    browser = await puppeteerExtra.launch(getBrowserConfig());
+    
+    let deviceConfig = devicePresets[device.toLowerCase()] || devicePresets.desktop;
     if (width && height) {
-      deviceSettings = { ...deviceSettings, width: parseInt(width), height: parseInt(height) };
+      deviceConfig = {
+        ...deviceConfig,
+        width: parseInt(width),
+        height: parseInt(height)
+      };
     }
 
-    await page.setUserAgent(deviceSettings.userAgent);
-    await page.setViewport({
-      width: deviceSettings.width,
-      height: deviceSettings.height,
-      deviceScaleFactor: deviceSettings.deviceScaleFactor,
-      isMobile: deviceSettings.isMobile,
-      hasTouch: deviceSettings.hasTouch,
+    const page = await setupPage(browser, deviceConfig);
+
+    await page.goto(url, {
+      waitUntil: 'networkidle0',
+      timeout: 15000
     });
 
-    // Block unnecessary resources
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      if (['font', 'media'].includes(request.resourceType())) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
+    await wait(1000);
 
-    // Navigate & take a screenshot
-    try {
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
-    } catch (error) {
-      console.warn(`Navigation timeout for ${url}, attempting screenshot anyway`);
-    }
-
-    await wait(500);
-
-    const img = await page.screenshot({
+    const screenshot = await page.screenshot({
       fullPage: fullPage === 'true',
       type: 'png',
       encoding: 'binary',
-      captureBeyondViewport: true,
+      captureBeyondViewport: true
     });
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'inline; filename="screenshot.png"');
     res.setHeader('Cache-Control', 'public, max-age=300');
-    res.end(img);
+    res.end(screenshot);
 
   } catch (error) {
     console.error('Screenshot error:', error);
-    res.status(500).send(`Screenshot failed: ${error.message}`);
+    res.status(500).json({
+      error: 'Screenshot failed',
+      message: error.message
+    });
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close().catch(console.error);
+    }
     release();
   }
 });
 
-// 🔍 Google Search Scraper Endpoint
-app.get('/google', async (req, res) => {
-  const { query } = req.query;
-  if (!query) return res.status(400).send({ error: 'Query parameter is required' });
-
-  let browser;
-  const release = await lock.acquire();
-
-  try {
-    browser = await puppeteerExtra.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-gpu'],
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
-
-    const page = await browser.newPage();
-    await page.setUserAgent(devicePresets.desktop.userAgent);
-
-    // Navigate to Google Search
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
-
-    // Extract search results
-    const results = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('div.tF2Cxc')).map(el => ({
-        title: el.querySelector('h3')?.innerText || '',
-        link: el.querySelector('a')?.href || '',
-        snippet: el.querySelector('.VwiC3b')?.innerText || '',
-      }));
-    });
-
-    res.json({ query, results });
-
-  } catch (error) {
-    console.error('Google search failed:', error);
-    res.status(500).json({ error: `Google search failed: ${error.message}` });
-  } finally {
-    if (browser) await browser.close();
-    release();
-  }
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// ✅ Health Check
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-// 🚀 Start the Server
+// Start server
 app.listen(port, () => {
-  console.log(`Service running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
