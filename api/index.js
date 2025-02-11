@@ -36,12 +36,11 @@ const devicePresets = {
   }
 };
 
+// Screenshot endpoint
 app.get('/ss', async (req, res) => {
   const { url, device = 'desktop', width, height, fullPage = 'true' } = req.query;
 
-  if (!url) {
-    return res.status(400).send('URL is required');
-  }
+  if (!url) return res.status(400).send('URL is required');
 
   let browser;
   const release = await lock.acquire();
@@ -63,19 +62,11 @@ app.get('/ss', async (req, res) => {
 
     const page = await browser.newPage();
 
-    // Set viewport and device parameters
     let deviceSettings = devicePresets[device.toLowerCase()] || devicePresets.desktop;
-    
-    // Override width and height if provided in query params
     if (width && height) {
-      deviceSettings = {
-        ...deviceSettings,
-        width: parseInt(width),
-        height: parseInt(height)
-      };
+      deviceSettings = { ...deviceSettings, width: parseInt(width), height: parseInt(height) };
     }
 
-    // Apply device settings
     await page.setUserAgent(deviceSettings.userAgent);
     await page.setViewport({
       width: deviceSettings.width,
@@ -85,10 +76,8 @@ app.get('/ss', async (req, res) => {
       hasTouch: deviceSettings.hasTouch,
     });
 
-    // Add request interception to optimize loading
     await page.setRequestInterception(true);
     page.on('request', (request) => {
-      // Skip unnecessary resources
       const resourceType = request.resourceType();
       if (['font', 'media'].includes(resourceType)) {
         request.abort();
@@ -97,46 +86,74 @@ app.get('/ss', async (req, res) => {
       }
     });
 
-    // Navigate to URL with improved error handling
     try {
-      await page.goto(url, {
-        waitUntil: 'networkidle2',
-        timeout: 10000 // 30 second timeout
-      });
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
     } catch (error) {
-      if (error.name === 'TimeoutError') {
-        console.warn(`Navigation timeout for ${url}, attempting screenshot anyway`);
-      } else {
-        throw error;
-      }
+      console.warn(`Navigation timeout for ${url}, attempting screenshot anyway`);
     }
 
-    // Wait for content to stabilize
     await wait(500);
+    const img = await page.screenshot({ fullPage: fullPage === 'true', type: 'png', encoding: 'binary', captureBeyondViewport: true });
 
-    // Take screenshot
-    const screenshotOptions = {
-      fullPage: fullPage === 'true',
-      type: 'png',
-      encoding: 'binary',
-      captureBeyondViewport: true,
-    };
-
-    const img = await page.screenshot(screenshotOptions);
-
-    // Set response headers
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Disposition', 'inline; filename="screenshot.png"');
-    res.setHeader('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
+    res.setHeader('Cache-Control', 'public, max-age=300');
     res.end(img);
 
   } catch (error) {
     console.error('Screenshot error:', error);
     res.status(500).send(`Screenshot failed: ${error.message}`);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
+    release();
+  }
+});
+
+// Google Search Scraper
+app.get('/google', async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).send('Query parameter "q" is required');
+
+  let browser;
+  const release = await lock.acquire();
+
+  try {
+    browser = await puppeteerExtra.launch({
+      args: [
+        ...chromium.args,
+        '--no-zygote',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
+
+    const page = await browser.newPage();
+    await page.setUserAgent(devicePresets.desktop.userAgent);
+    await page.setViewport(devicePresets.desktop);
+
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+
+    const results = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.tF2Cxc')).map(result => ({
+        title: result.querySelector('h3')?.innerText || 'No title',
+        link: result.querySelector('a')?.href || 'No link',
+        snippet: result.querySelector('.VwiC3b')?.innerText || 'No snippet'
+      }));
+    });
+
+    res.json({ query: q, results });
+
+  } catch (error) {
+    console.error('Google search error:', error);
+    res.status(500).send(`Google search failed: ${error.message}`);
+  } finally {
+    if (browser) await browser.close();
     release();
   }
 });
@@ -147,5 +164,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Screenshot service running on port ${port}`);
+  console.log(`Service running on port ${port}`);
 });
