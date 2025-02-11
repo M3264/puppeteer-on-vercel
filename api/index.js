@@ -2,7 +2,7 @@ const express = require('express');
 const puppeteerExtra = require('puppeteer-extra');
 const chromium = require('@sparticuz/chromium');
 const { Mutex } = require('async-mutex');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth').default;
 
 const app = express();
 const port = 3000;
