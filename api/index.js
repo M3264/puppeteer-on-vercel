@@ -2,6 +2,7 @@ const express = require('express');
 const puppeteerExtra = require('puppeteer-extra');
 const chromium = require('@sparticuz/chromium');
 const { Mutex } = require('async-mutex');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 const app = express();
 const port = 3000;
@@ -109,7 +110,8 @@ app.get('/ss', async (req, res) => {
   }
 });
 
-// Google Search Scraper
+puppeteerExtra.use(StealthPlugin());
+
 app.get('/google', async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).send('Query parameter "q" is required');
@@ -126,18 +128,17 @@ app.get('/google', async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-gpu',
       ],
-      defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
-      ignoreHTTPSErrors: true,
     });
 
     const page = await browser.newPage();
-    await page.setUserAgent(devicePresets.desktop.userAgent);
-    await page.setViewport(devicePresets.desktop);
-
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
     const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+
+    await page.waitForSelector('.tF2Cxc', { timeout: 5000 });
 
     const results = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('.tF2Cxc')).map(result => ({
